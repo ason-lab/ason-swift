@@ -5,5 +5,12 @@
 .swiftpm/
 Package.resolved
 
+# Xcode
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+*.playground
+
 # macOS
 .DS_Store

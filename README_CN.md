@@ -1,0 +1,68 @@
+# ason-swift
+
+[ASON](https://github.com/ason-lab/ason) 的 Swift 版本，核心目标是低分配编解码、Schema 优先布局与高吞吐二进制链路。
+
+[English](README.md)
+
+## 特性
+
+- 面向零拷贝：基于 UTF-8 字节数组 + 索引游标解析
+- 热路径不走 JSON 中间层（`encode`/`decode`/`encodeBinary`/`decodeBinary`）
+- Schema-first 元组编码，减少重复字段名开销
+- 支持 typed / untyped 文本输出与 pretty 格式
+- 二进制编解码带 typed schema 头，支持直接 roundtrip
+
+## API
+
+- `encode(_:)`
+- `decode(_:)`
+- `encodeBinary(_:)`
+- `decodeBinary(_:)`
+- `encodePrettyTyped(_:)`
+- `encodePretty(_:)`
+- `encodeTyped(_:)`
+
+## 快速开始
+
+```swift
+import AsonSwift
+
+let user: AsonValue = .object([
+  "id": .int(1),
+  "name": .string("Alice"),
+  "active": .bool(true)
+])
+
+let text = try encode(user)
+let typed = try encodeTyped(user)
+let parsed = try decode(typed)
+let bin = try encodeBinary(user)
+let back = try decodeBinary(bin)
+```
+
+## 示例
+
+```bash
+swift run basic
+swift run complex
+swift run cross_compat
+swift run bench -c release
+```
+
+## 性能优势
+
+- 直接在字节缓冲区上解析，临时对象和中间分配更少。
+- SIMD 分支优化 ASCII 数据的分隔符扫描。
+- 元组行编码避免 JSON 对象反复写字段名。
+- 二进制模式减少文本解析开销，适合高吞吐 IO 场景。
+
+## 测试优势
+
+- 覆盖文本编解码和二进制 roundtrip。
+- 包含转义字符串、多行输入、注释、数组/对象 schema 等场景。
+- 与其它 ASON 语言实现保持同风格覆盖方式。
+- 可作为跨语言兼容扩展测试的基础用例。
+
+## 许可证
+
+MIT
