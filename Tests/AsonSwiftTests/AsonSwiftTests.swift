@@ -648,6 +648,7 @@ assertThrows({ _ = try decode("not-ason") }, "garbage input")
 assertThrows({ _ = try decode("{id@int}:") }, "schema with no data")
 assertThrows({ _ = try decode("{id@int}:(abc)") }, "int field with non-int data")
 assertThrows({ _ = try decode("{id@badtype}:(1)") }, "unknown type")
+assertThrows({ _ = try decode("{id@int,name@str}:(101,Alice),(102,Bob)") }, "single schema with multiple tuples should throw")
 
 // ===========================================================================
 // 17. Cross-compat format
