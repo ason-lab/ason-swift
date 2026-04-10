@@ -11,8 +11,8 @@ Swift implementation for [ASON](https://github.com/ason-lab/ason), focused on lo
 - No JSON bridge in hot paths (`encode`/`decode`/`encodeBinary`/`decodeBinary`)
 - Schema-first tuple encoding to reduce repeated field-name overhead
 - Typed and untyped text modes + pretty format
-- Binary codec with typed schema header for direct roundtrip
-- Follows the latest ASON spec: schema annotations use `@`, and complex fields keep the required `@{}` / `@[]` structural scaffold
+- Binary codec with scalar-hint schema header for direct roundtrip
+- Follows the latest ASON spec: `@` is the field binding marker, scalar hints are optional, and complex fields keep the required `@{}` / `@[]` structural bindings
 - No standalone `map` type; dictionary-like data should be modeled as arrays of key-value tuples such as `attrs@[{key@str,value@int}]`
 
 ## API

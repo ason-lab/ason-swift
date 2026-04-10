@@ -10,8 +10,8 @@
 - 热路径不走 JSON 中间层（`encode`/`decode`/`encodeBinary`/`decodeBinary`）
 - Schema-first 元组编码，减少重复字段名开销
 - 支持 typed / untyped 文本输出与 pretty 格式
-- 二进制编解码带 typed schema 头，支持直接 roundtrip
-- 遵循最新 ASON 规范：Schema 注解使用 `@`，复杂类型必须保留 `@{}` / `@[]` 结构脚手架
+- 二进制编解码带基本类型提示 schema 头，支持直接 roundtrip
+- 遵循最新 ASON 规范：`@` 是字段绑定符，基本类型提示可选，复杂类型必须保留 `@{}` / `@[]` 结构绑定
 
 ## API
 
