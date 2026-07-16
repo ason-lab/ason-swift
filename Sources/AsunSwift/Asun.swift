@@ -594,7 +594,7 @@ public struct AsunTypedField<Row> {
                 row[keyPath: kp] = arr
             },
             decodeBinary: { r, row in
-                let count = Int(try r.readUInt32())
+                let count = Int(try r.readUvarint())
                 var arr: [Int64] = []
                 arr.reserveCapacity(count)
                 for _ in 0..<count { arr.append(try r.readInt64()) }
@@ -611,7 +611,7 @@ public struct AsunTypedField<Row> {
             },
             encodeBinary: { w, row in
                 let arr = row[keyPath: kp]
-                w.writeUInt32(UInt32(arr.count))
+                w.writeUvarint(UInt64(arr.count))
                 for value in arr { w.writeInt64(value) }
             }
         ))
@@ -636,7 +636,7 @@ public struct AsunTypedField<Row> {
                 row[keyPath: kp] = arr
             },
             decodeBinary: { r, row in
-                let count = Int(try r.readUInt32())
+                let count = Int(try r.readUvarint())
                 var arr: [String] = []
                 arr.reserveCapacity(count)
                 for _ in 0..<count { arr.append(try r.readString32()) }
@@ -653,7 +653,7 @@ public struct AsunTypedField<Row> {
             },
             encodeBinary: { w, row in
                 let arr = row[keyPath: kp]
-                w.writeUInt32(UInt32(arr.count))
+                w.writeUvarint(UInt64(arr.count))
                 for value in arr { try w.writeString32(value) }
             }
         ))
@@ -678,7 +678,7 @@ public struct AsunTypedField<Row> {
                 row[keyPath: kp] = arr
             },
             decodeBinary: { r, row in
-                let count = Int(try r.readUInt32())
+                let count = Int(try r.readUvarint())
                 var arr: [Bool] = []
                 arr.reserveCapacity(count)
                 for _ in 0..<count { arr.append(try r.readByte() != 0) }
@@ -696,7 +696,7 @@ public struct AsunTypedField<Row> {
             },
             encodeBinary: { w, row in
                 let arr = row[keyPath: kp]
-                w.writeUInt32(UInt32(arr.count))
+                w.writeUvarint(UInt64(arr.count))
                 for value in arr { w.writeBytes([value ? 1 : 0]) }
             }
         ))
@@ -721,7 +721,7 @@ public struct AsunTypedField<Row> {
                 row[keyPath: kp] = arr
             },
             decodeBinary: { r, row in
-                let count = Int(try r.readUInt32())
+                let count = Int(try r.readUvarint())
                 var arr: [Double] = []
                 arr.reserveCapacity(count)
                 for _ in 0..<count { arr.append(try r.readDouble()) }
@@ -738,7 +738,7 @@ public struct AsunTypedField<Row> {
             },
             encodeBinary: { w, row in
                 let arr = row[keyPath: kp]
-                w.writeUInt32(UInt32(arr.count))
+                w.writeUvarint(UInt64(arr.count))
                 for value in arr { w.writeDouble(value) }
             }
         ))
@@ -828,7 +828,7 @@ public struct AsunStructCodec<Row> {
         writer.reserveCapacity(headerBytes.count + impls.count * 16 + 16)
         writer.writeStaticBytes([0x41, 0x53, 0x4F, 0x4E, 0x42, 0x49, 0x4E, 0x31])
         try writer.writeBytes32(headerBytes)
-        writer.writeUInt32(1)
+        writer.writeUvarint(1)
         try encodeRowBinary(&writer, row)
         return writer.data
     }
@@ -841,7 +841,7 @@ public struct AsunStructCodec<Row> {
         if try !reader.skipString32Bytes(matching: headerBytes) {
             throw AsunError.invalidData("typed schema header mismatch")
         }
-        let rowCount = Int(try reader.readUInt32())
+        let rowCount = Int(try reader.readUvarint())
         if rowCount != 1 {
             throw AsunError.invalidData("single root expects rowCount=1")
         }
@@ -944,7 +944,7 @@ public struct AsunStructArrayCodec<Row> {
         writer.reserveCapacity(headerBytes.count + rows.count * 32 + 16)
         writer.writeStaticBytes([0x41, 0x53, 0x4F, 0x4E, 0x42, 0x49, 0x4E, 0x31])
         try writer.writeBytes32(headerBytes)
-        writer.writeUInt32(UInt32(rows.count))
+        writer.writeUvarint(UInt64(rows.count))
         for row in rows {
             try rowCodec.encodeRowBinary(&writer, row)
         }
@@ -959,7 +959,7 @@ public struct AsunStructArrayCodec<Row> {
         if try !reader.skipString32Bytes(matching: headerBytes) {
             throw AsunError.invalidData("typed schema header mismatch")
         }
-        let rowCount = Int(try reader.readUInt32())
+        let rowCount = Int(try reader.readUvarint())
         var rows: [Row] = []
         rows.reserveCapacity(rowCount)
         for _ in 0..<rowCount {
@@ -1197,7 +1197,7 @@ private func decodeBinaryWithPreparedSchema(_ data: Data, schema: RootSchema) th
 }
 
 private func decodeBinaryRows(_ reader: inout BinaryReader, schema: RootSchema) throws -> AsunValue {
-    let rowCount = Int(try reader.readUInt32())
+    let rowCount = Int(try reader.readUvarint())
     if schema.isSlice {
         var rows: [AsunValue] = []
         rows.reserveCapacity(rowCount)
@@ -1581,7 +1581,7 @@ private func encodeBinaryWithSchema(_ value: AsunValue, schema: RootSchema) thro
         guard case .array(let arr) = value else {
             throw AsunError.invalidRoot("slice root must be array")
         }
-        writer.writeUInt32(UInt32(arr.count))
+        writer.writeUvarint(UInt64(arr.count))
         for row in arr {
             guard case .object(let obj) = row else {
                 throw AsunError.invalidRoot("array root requires object rows")
@@ -1597,7 +1597,7 @@ private func encodeBinaryWithSchema(_ value: AsunValue, schema: RootSchema) thro
     guard case .object(let obj) = value else {
         throw AsunError.invalidRoot("root must be object")
     }
-    writer.writeUInt32(1)
+    writer.writeUvarint(1)
     for f in schema.fields {
         let v = obj[f.name] ?? .null
         try writer.writeValue(v, as: f.type)
@@ -2982,19 +2982,28 @@ private struct BinaryWriter {
         data.append(contentsOf: bytes)
     }
 
-    mutating func writeUInt32(_ v: UInt32) {
-        var x = v.littleEndian
-        withUnsafeBytes(of: &x) { data.append(contentsOf: $0) }
+    /// LEB128 unsigned varint (matches the Rust reference).
+    mutating func writeUvarint(_ v: UInt64) {
+        var x = v
+        while x >= 0x80 {
+            data.append(UInt8(truncatingIfNeeded: x) | 0x80)
+            x >>= 7
+        }
+        data.append(UInt8(truncatingIfNeeded: x))
+    }
+
+    /// zigzag + LEB128 signed varint.
+    mutating func writeIvarint(_ v: Int64) {
+        let zz = UInt64(bitPattern: (v << 1) ^ (v >> 63))
+        writeUvarint(zz)
     }
 
     mutating func writeInt64(_ v: Int64) {
-        var x = v.littleEndian
-        withUnsafeBytes(of: &x) { data.append(contentsOf: $0) }
+        writeIvarint(v)
     }
 
     mutating func writeUInt64(_ v: UInt64) {
-        var x = v.littleEndian
-        withUnsafeBytes(of: &x) { data.append(contentsOf: $0) }
+        writeUvarint(v)
     }
 
     mutating func writeDouble(_ v: Double) {
@@ -3004,19 +3013,13 @@ private struct BinaryWriter {
 
     mutating func writeString32(_ s: String) throws {
         let count = s.utf8.count
-        guard count <= Int(UInt32.max) else {
-            throw AsunError.invalidData("string too large")
-        }
-        writeUInt32(UInt32(count))
+        writeUvarint(UInt64(count))
         var copy = s
         copy.withUTF8 { data.append(contentsOf: $0) }
     }
 
     mutating func writeBytes32(_ bytes: [UInt8]) throws {
-        guard bytes.count <= Int(UInt32.max) else {
-            throw AsunError.invalidData("string too large")
-        }
-        writeUInt32(UInt32(bytes.count))
+        writeUvarint(UInt64(bytes.count))
         data.append(contentsOf: bytes)
     }
 
@@ -3045,13 +3048,13 @@ private struct BinaryWriter {
             throw AsunError.invalidData("binary bool type mismatch")
         case .str:
             if case .string(let s) = value { try writeString32(s); return }
-            if case .null = value { writeUInt32(UInt32.max); return }
+            if case .null = value { writeUvarint(UInt64.max); return }
             throw AsunError.invalidData("binary string type mismatch")
         case .array(let inner):
             guard case .array(let arr) = value else {
                 throw AsunError.invalidData("binary array type mismatch")
             }
-            writeUInt32(UInt32(arr.count))
+            writeUvarint(UInt64(arr.count))
             for v in arr {
                 try writeValue(v, as: inner)
             }
@@ -3106,38 +3109,53 @@ private struct BinaryReader {
     }
 
     mutating func skipString32Bytes(matching expected: [UInt8]) throws -> Bool {
-        let len = Int(try readUInt32())
-        guard len != Int(UInt32.max) else { return expected.isEmpty }
+        let rawLen = try readUvarint()
+        guard rawLen != UInt64.max else { return expected.isEmpty }
+        let len = Int(rawLen)
         guard idx + len <= data.count else { throw AsunError.unexpectedEOF }
         let matches = len == expected.count && data[idx..<(idx + len)].elementsEqual(expected)
         idx += len
         return matches
     }
 
-    mutating func readUInt32() throws -> UInt32 {
-        let value: UInt32 = try readFixedWidthInteger()
-        return value.littleEndian
+    /// LEB128 unsigned varint (matches the Rust reference).
+    mutating func readUvarint() throws -> UInt64 {
+        var result: UInt64 = 0
+        var shift: UInt64 = 0
+        while true {
+            guard idx < data.count else { throw AsunError.unexpectedEOF }
+            let b = data[idx]
+            idx += 1
+            if shift >= 64 { throw AsunError.invalidData("binary decode: varint overflow") }
+            result |= UInt64(b & 0x7F) << shift
+            if b & 0x80 == 0 { return result }
+            shift += 7
+        }
+    }
+
+    /// zigzag + LEB128 signed varint.
+    mutating func readIvarint() throws -> Int64 {
+        let v = try readUvarint()
+        return Int64(bitPattern: (v >> 1) ^ (~(v & 1) &+ 1))
     }
 
     mutating func readInt64() throws -> Int64 {
-        let value: Int64 = try readFixedWidthInteger()
-        return value.littleEndian
+        try readIvarint()
     }
 
     mutating func readUInt64() throws -> UInt64 {
-        let value: UInt64 = try readFixedWidthInteger()
-        return value.littleEndian
+        try readUvarint()
     }
 
     mutating func readDouble() throws -> Double {
-        let bits = try readUInt64()
-        return Double(bitPattern: bits)
+        let bits: UInt64 = try readFixedWidthInteger()
+        return Double(bitPattern: bits.littleEndian)
     }
 
     mutating func readString32() throws -> String {
-        let len = try readUInt32()
-        if len == UInt32.max { return "" }
-        let count = Int(len)
+        let rawLen = try readUvarint()
+        if rawLen == UInt64.max { return "" }
+        let count = Int(rawLen)
         guard idx + count <= data.count else { throw AsunError.unexpectedEOF }
         let out = data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> String in
             let base = raw.baseAddress!.advanced(by: idx)
@@ -3171,9 +3189,9 @@ private struct BinaryReader {
         case .bool:
             return .bool(try readByte() != 0)
         case .str:
-            let len = try readUInt32()
-            if len == UInt32.max { return .null }
-            let count = Int(len)
+            let rawLen = try readUvarint()
+            if rawLen == UInt64.max { return .null }
+            let count = Int(rawLen)
             guard idx + count <= data.count else { throw AsunError.unexpectedEOF }
             let out = data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> String in
                 let base = raw.baseAddress!.advanced(by: idx)
@@ -3183,7 +3201,7 @@ private struct BinaryReader {
             idx += count
             return .string(out)
         case .array(let inner):
-            let n = Int(try readUInt32())
+            let n = Int(try readUvarint())
             var out: [AsunValue] = []
             out.reserveCapacity(n)
             for _ in 0..<n {
