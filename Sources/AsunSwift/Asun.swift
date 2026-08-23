@@ -92,55 +92,19 @@ private func writeF64(_ buf: inout [UInt8], _ v: Double) {
         }
         return
     }
-    // Integer-valued float: write as int + ".0"
+    // Integer-valued float: write as int + ".0".
     if v.rounded() == v, v >= -9.0e18, v <= 9.0e18 {
         writeI64(&buf, Int64(v))
         buf.append(0x2E) // '.'
         buf.append(0x30) // '0'
         return
     }
-    // One decimal place fast path
-    let v10 = v * 10.0
-    if v10.rounded() == v10, Swift.abs(v10) < 1e18 {
-        let vi = Int64(v10)
-        if vi < 0 {
-            buf.append(0x2D) // '-'
-            let pos = UInt64(~vi &+ 1)
-            writeU64(&buf, pos / 10)
-            buf.append(0x2E) // '.'
-            buf.append(UInt8(pos % 10) + 0x30)
-        } else {
-            writeU64(&buf, UInt64(vi) / 10)
-            buf.append(0x2E) // '.'
-            buf.append(UInt8(UInt64(vi) % 10) + 0x30)
-        }
-        return
-    }
-    // Two decimal places fast path
-    let v100 = v * 100.0
-    if v100.rounded() == v100, Swift.abs(v100) < 1e18 {
-        let vi = Int64(v100)
-        if vi < 0 {
-            buf.append(0x2D) // '-'
-            let pos = UInt64(~vi &+ 1)
-            writeU64(&buf, pos / 100)
-            buf.append(0x2E) // '.'
-            let frac = Int(pos % 100)
-            buf.append(DEC_DIGITS[frac * 2])
-            let d2 = DEC_DIGITS[frac * 2 + 1]
-            if d2 != 0x30 { buf.append(d2) }
-        } else {
-            let pos = UInt64(vi)
-            writeU64(&buf, pos / 100)
-            buf.append(0x2E) // '.'
-            let frac = Int(pos % 100)
-            buf.append(DEC_DIGITS[frac * 2])
-            let d2 = DEC_DIGITS[frac * 2 + 1]
-            if d2 != 0x30 { buf.append(d2) }
-        }
-        return
-    }
-    // General: use String(v) which uses grisu/dragonbox algorithm
+    // General case: Swift's `String(Double)` uses a shortest-round-trip
+    // algorithm (Swift's own Ryū-style formatter), so the emitted text parses
+    // back to the exact same Double. The previous ×10/×100 "fast paths"
+    // reconstructed the decimal via integer math and could emit a string that
+    // decoded to a *different* Double (e.g. because `k/10` is not exact), so
+    // they are removed to guarantee round-trip fidelity (P1-4).
     var s = "\(v)"
     if !s.contains(".") && !s.contains("e") && !s.contains("E") {
         s += ".0"
@@ -244,6 +208,12 @@ private struct RootSchema: Hashable {
     let fields: [SchemaField]
 }
 
+/// Upper bound on entries in each global parse/encode cache. Prevents an
+/// attacker who feeds an unbounded stream of distinct schemas from growing the
+/// caches without limit (P1-6). On overflow the cache is cleared wholesale —
+/// the simple, allocation-free strategy shared across the language ports.
+private let MAX_CACHED_SCHEMAS = 512
+
 private enum SchemaCache {
     static let lock = NSLock()
     static var parsed: [String: RootSchema] = [:]
@@ -256,6 +226,7 @@ private enum SchemaCache {
 
     static func put(_ key: String, _ value: RootSchema) {
         lock.lock()
+        if parsed.count >= MAX_CACHED_SCHEMAS { parsed.removeAll(keepingCapacity: true) }
         parsed[key] = value
         lock.unlock()
     }
@@ -278,6 +249,7 @@ private enum HeaderCache {
 
     static func put(_ key: HeaderCacheKey, _ value: [UInt8]) {
         lock.lock()
+        if encoded.count >= MAX_CACHED_SCHEMAS { encoded.removeAll(keepingCapacity: true) }
         encoded[key] = value
         lock.unlock()
     }
@@ -338,6 +310,7 @@ private enum RootSchemaCache {
 
     static func put(_ key: ShapeCacheKey, _ value: RootSchema) {
         lock.lock()
+        if cached.count >= MAX_CACHED_SCHEMAS { cached.removeAll(keepingCapacity: true) }
         cached[key] = value
         lock.unlock()
     }
@@ -594,7 +567,7 @@ public struct AsunTypedField<Row> {
                 row[keyPath: kp] = arr
             },
             decodeBinary: { r, row in
-                let count = Int(try r.readUvarint())
+                let count = try r.readCount()
                 var arr: [Int64] = []
                 arr.reserveCapacity(count)
                 for _ in 0..<count { arr.append(try r.readInt64()) }
@@ -636,7 +609,7 @@ public struct AsunTypedField<Row> {
                 row[keyPath: kp] = arr
             },
             decodeBinary: { r, row in
-                let count = Int(try r.readUvarint())
+                let count = try r.readCount()
                 var arr: [String] = []
                 arr.reserveCapacity(count)
                 for _ in 0..<count { arr.append(try r.readString32()) }
@@ -678,7 +651,7 @@ public struct AsunTypedField<Row> {
                 row[keyPath: kp] = arr
             },
             decodeBinary: { r, row in
-                let count = Int(try r.readUvarint())
+                let count = try r.readCount()
                 var arr: [Bool] = []
                 arr.reserveCapacity(count)
                 for _ in 0..<count { arr.append(try r.readByte() != 0) }
@@ -721,7 +694,7 @@ public struct AsunTypedField<Row> {
                 row[keyPath: kp] = arr
             },
             decodeBinary: { r, row in
-                let count = Int(try r.readUvarint())
+                let count = try r.readCount()
                 var arr: [Double] = []
                 arr.reserveCapacity(count)
                 for _ in 0..<count { arr.append(try r.readDouble()) }
@@ -841,7 +814,7 @@ public struct AsunStructCodec<Row> {
         if try !reader.skipString32Bytes(matching: headerBytes) {
             throw AsunError.invalidData("typed schema header mismatch")
         }
-        let rowCount = Int(try reader.readUvarint())
+        let rowCount = try reader.readCount()
         if rowCount != 1 {
             throw AsunError.invalidData("single root expects rowCount=1")
         }
@@ -959,7 +932,7 @@ public struct AsunStructArrayCodec<Row> {
         if try !reader.skipString32Bytes(matching: headerBytes) {
             throw AsunError.invalidData("typed schema header mismatch")
         }
-        let rowCount = Int(try reader.readUvarint())
+        let rowCount = try reader.readCount()
         var rows: [Row] = []
         rows.reserveCapacity(rowCount)
         for _ in 0..<rowCount {
@@ -1197,7 +1170,7 @@ private func decodeBinaryWithPreparedSchema(_ data: Data, schema: RootSchema) th
 }
 
 private func decodeBinaryRows(_ reader: inout BinaryReader, schema: RootSchema) throws -> AsunValue {
-    let rowCount = Int(try reader.readUvarint())
+    let rowCount = try reader.readCount()
     if schema.isSlice {
         var rows: [AsunValue] = []
         rows.reserveCapacity(rowCount)
@@ -1788,7 +1761,15 @@ private func encodeValueBuf(_ buf: inout [UInt8], _ value: AsunValue, as type: S
         try encodeDynamicBuf(&buf, value)
     case .int:
         if case .int(let v) = value { writeI64(&buf, v); return }
-        if case .float(let v) = value { writeI64(&buf, Int64(v)); return }
+        if case .float(let v) = value {
+            // A float in an int field must be a finite, in-range whole number;
+            // `Int64(v)` would trap on NaN/Inf/overflow (P1-5).
+            guard v.isFinite, v.rounded() == v,
+                  v >= -9_223_372_036_854_775_808.0, v < 9_223_372_036_854_775_808.0 else {
+                throw AsunError.invalidData("float out of int range")
+            }
+            writeI64(&buf, Int64(v)); return
+        }
         throw AsunError.invalidData("expected int")
     case .float:
         if case .float(let v) = value { writeF64(&buf, v); return }
@@ -2200,7 +2181,7 @@ private func findRootSchemaDelimiter(in bytes: [UInt8]) throws -> Int {
 
 /// Strict-ABNF classifier for an already-trimmed bare token.
 /// Implements SPEC §8.1 type-resolution priority.
-private func classifyPlainToken(_ bytes: [UInt8], _ start: Int, _ end: Int) -> AsunValue {
+private func classifyPlainToken(_ bytes: [UInt8], _ start: Int, _ end: Int) throws -> AsunValue {
     let count = end - start
     if count == 0 { return .string("") }
 
@@ -2255,7 +2236,7 @@ private func classifyPlainToken(_ bytes: [UInt8], _ start: Int, _ end: Int) -> A
     }
 
     // Fallback: string. Apply plain-token escape unwrap.
-    return .string(unescapePlainToken(bytes, start, end))
+    return .string(try unescapePlainToken(bytes, start, end))
 }
 
 private func parseStrictFloat(_ bytes: [UInt8], _ start: Int, _ end: Int) -> Double? {
@@ -2291,7 +2272,7 @@ private func parseStrictFloat(_ bytes: [UInt8], _ start: Int, _ end: Int) -> Dou
 /// Unescape a plain (unquoted) token per `escape-char` in GRAMMAR.abnf.
 /// Recognised: `\\ \" \n \t \r \b \f \, \( \) \[ \] \{ \} \: \@ \uXXXX`.
 /// Unknown escapes pass the byte through verbatim (lenient on input).
-private func unescapePlainToken(_ bytes: [UInt8], _ start: Int, _ end: Int) -> String {
+private func unescapePlainToken(_ bytes: [UInt8], _ start: Int, _ end: Int) throws -> String {
     // Fast path: no backslash → uninitialised-buffer copy (skips UTF-8 verify).
     var anyEsc = false
     for i in start..<end where bytes[i] == 0x5C { anyEsc = true; break }
@@ -2316,14 +2297,9 @@ private func unescapePlainToken(_ bytes: [UInt8], _ start: Int, _ end: Int) -> S
             // Structural escapes from the grammar: `\\ \" \, \( \) \[ \] \{ \} \: \@`.
             case 0x5C, 0x22, 0x2C, 0x28, 0x29, 0x5B, 0x5D, 0x7B, 0x7D, 0x40, 0x3A:
                 out.append(n); i += 2; continue
-            case 0x75: // \uXXXX
-                if i + 5 < end,
-                   let cp = parseHex4(bytes, i + 2) {
-                    appendUnicodeScalar(&out, cp)
-                    i += 6
-                    continue
-                }
-                out.append(c); i += 1; continue
+            case 0x75: // \uXXXX (with surrogate-pair combining)
+                i = try decodeUnicodeEscape(bytes, i + 2, end, into: &out)
+                continue
             default:
                 // Unknown escape: emit the byte verbatim for tolerance.
                 out.append(n); i += 2; continue
@@ -2357,16 +2333,58 @@ private func appendUnicodeScalar(_ out: inout [UInt8], _ cp: UInt32) {
     } else if cp < 0x800 {
         out.append(UInt8(0xC0 | (cp >> 6)))
         out.append(UInt8(0x80 | (cp & 0x3F)))
-    } else {
+    } else if cp < 0x10000 {
         out.append(UInt8(0xE0 | (cp >> 12)))
+        out.append(UInt8(0x80 | ((cp >> 6) & 0x3F)))
+        out.append(UInt8(0x80 | (cp & 0x3F)))
+    } else {
+        // Astral plane (U+10000…U+10FFFF): 4-byte UTF-8.
+        out.append(UInt8(0xF0 | (cp >> 18)))
+        out.append(UInt8(0x80 | ((cp >> 12) & 0x3F)))
         out.append(UInt8(0x80 | ((cp >> 6) & 0x3F)))
         out.append(UInt8(0x80 | (cp & 0x3F)))
     }
 }
 
+/// Decode a `\uXXXX` escape (and, for a high surrogate, the mandatory
+/// following `\uXXXX` low surrogate) into a UTF-8 scalar appended to `out`.
+///
+/// `hexStart` is the index of the first hex digit (i.e. just past `\u`). On
+/// success returns the index *after* the whole escape (one or two `\uXXXX`
+/// units). Rejects invalid hex, lone/unpaired surrogates, and truncation
+/// rather than emitting broken WTF-8/CESU-8 bytes (P2-7).
+private func decodeUnicodeEscape(_ bytes: [UInt8], _ hexStart: Int, _ end: Int,
+                                 into out: inout [UInt8]) throws -> Int {
+    guard hexStart + 4 <= end, let hi = parseHex4(bytes, hexStart) else {
+        throw AsunError.invalidData("invalid \\u escape")
+    }
+    var after = hexStart + 4
+    if hi >= 0xD800 && hi <= 0xDBFF {
+        // High surrogate: a low surrogate `\uXXXX` must follow immediately.
+        guard after + 6 <= end, bytes[after] == 0x5C, bytes[after + 1] == 0x75,
+              let lo = parseHex4(bytes, after + 2), lo >= 0xDC00, lo <= 0xDFFF else {
+            throw AsunError.invalidData("invalid surrogate pair")
+        }
+        let cp = 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)
+        appendUnicodeScalar(&out, cp)
+        after += 6
+    } else if hi >= 0xDC00 && hi <= 0xDFFF {
+        // Lone low surrogate is invalid.
+        throw AsunError.invalidData("invalid lone surrogate")
+    } else {
+        appendUnicodeScalar(&out, hi)
+    }
+    return after
+}
+
+/// Maximum nesting depth for recursive parsing/encoding. Bounds the native
+/// call stack so adversarial input like `[[[[...` can't overflow it (P0-2).
+private let MAX_DEPTH = 128
+
 private struct TextParser {
     let storage: [UInt8]
     var idx: Int = 0
+    var depth: Int = 0
 
     init(_ text: String) {
         self.storage = Array(text.utf8)
@@ -2377,6 +2395,12 @@ private struct TextParser {
     }
 
     var isAtEnd: Bool { idx >= storage.count }
+
+    @inline(__always)
+    mutating func enterDepth() throws {
+        depth += 1
+        if depth > MAX_DEPTH { throw AsunError.invalidData("maximum nesting depth exceeded") }
+    }
 
     @inline(__always)
     mutating func skipNoise() {
@@ -2447,6 +2471,8 @@ private struct TextParser {
     }
 
     mutating func parseObjectSchema() throws -> [SchemaField] {
+        try enterDepth()
+        defer { depth -= 1 }
         skipNoise()
         try expect(byte: 0x7B) // '{'
         skipNoise()
@@ -2487,6 +2513,8 @@ private struct TextParser {
     }
 
     mutating func parseType() throws -> SchemaType {
+        try enterDepth()
+        defer { depth -= 1 }
         skipNoise()
         guard let c = peek() else { throw AsunError.unexpectedEOF }
 
@@ -2546,6 +2574,8 @@ private struct TextParser {
     }
 
     mutating func parseValue(as type: SchemaType) throws -> AsunValue {
+        try enterDepth()
+        defer { depth -= 1 }
         skipNoise()
 
         if type.isOptional {
@@ -2586,6 +2616,8 @@ private struct TextParser {
     }
 
     mutating func parseDynamicValue() throws -> AsunValue {
+        try enterDepth()
+        defer { depth -= 1 }
         skipNoise()
         guard let c = peek() else { return .null }
         if c == 0x22 { // '"'
@@ -2634,7 +2666,7 @@ private struct TextParser {
             else { break }
         }
         if begin == end { return .null }
-        return classifyPlainToken(storage, begin, end)
+        return try classifyPlainToken(storage, begin, end)
     }
 
     mutating func parseStringToken() throws -> String {
@@ -2709,13 +2741,8 @@ private struct TextParser {
                 // `\, \( \) \[ \] \{ \} \: \@`.
                 case 0x2C, 0x28, 0x29, 0x5B, 0x5D, 0x7B, 0x7D, 0x40, 0x3A:
                     buf.append(n)
-                case 0x75: // \uXXXX
-                    if idx + 4 <= storage.count, let cp = parseHex4(storage, idx) {
-                        appendUnicodeScalar(&buf, cp)
-                        idx += 4
-                    } else {
-                        throw AsunError.invalidData("invalid \\u escape")
-                    }
+                case 0x75: // \uXXXX (with surrogate-pair combining)
+                    idx = try decodeUnicodeEscape(storage, idx, storage.count, into: &buf)
                 default:
                     // Lenient on input: emit the byte verbatim.
                     buf.append(n)
@@ -2832,7 +2859,7 @@ private struct TextParser {
             if c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D { begin += 1 }
             else { break }
         }
-        return unescapePlainToken(storage, begin, end)
+        return try unescapePlainToken(storage, begin, end)
     }
 
     /// Skip whitespace and `/* */` comments, throwing on unterminated comments.
@@ -2867,6 +2894,8 @@ private struct TextParser {
     /// Sparse holes (`[,]`, `[1,,3]`) become null entries.
     /// Trailing commas (`[1,2,3,]`) are tolerated.
     mutating func parsePlainArray() throws -> AsunValue {
+        try enterDepth()
+        defer { depth -= 1 }
         try expect(byte: 0x5B) // '['
         var items: [AsunValue] = []
         var first = true
@@ -2933,7 +2962,7 @@ private struct TextParser {
             if b == 0x20 || b == 0x09 || b == 0x0A || b == 0x0D { begin += 1 }
             else { break }
         }
-        return classifyPlainToken(storage, begin, end)
+        return try classifyPlainToken(storage, begin, end)
     }
 
     /// Parse a top-level bare scalar value (anything that isn't a schema, array,
@@ -2959,7 +2988,7 @@ private struct TextParser {
             if b == 0x20 || b == 0x09 || b == 0x0A || b == 0x0D { begin += 1 }
             else { break }
         }
-        return classifyPlainToken(storage, begin, end)
+        return try classifyPlainToken(storage, begin, end)
     }
 }
 
@@ -3074,9 +3103,29 @@ private struct BinaryWriter {
 private struct BinaryReader {
     let data: Data
     var idx: Int = 0
+    var depth: Int = 0
 
     init(_ data: Data) {
         self.data = data
+    }
+
+    @inline(__always)
+    mutating func enterDepth() throws {
+        depth += 1
+        if depth > MAX_DEPTH { throw AsunError.invalidData("maximum nesting depth exceeded") }
+    }
+
+    /// Read a uvarint used as an element/byte count and validate it. An
+    /// attacker-controlled length must not (a) exceed `Int.max` — `Int(_:)`
+    /// would trap — nor (b) exceed the bytes remaining, which would trigger a
+    /// giant `reserveCapacity` before the eventual EOF (P1-5). Each element is
+    /// at least one byte, so a valid count never exceeds the remaining bytes.
+    mutating func readCount() throws -> Int {
+        let raw = try readUvarint()
+        guard raw <= UInt64(Int.max), Int(raw) <= data.count - idx else {
+            throw AsunError.invalidData("binary decode: length out of range")
+        }
+        return Int(raw)
     }
 
     mutating func readBytes(_ count: Int) throws -> [UInt8] {
@@ -3111,8 +3160,10 @@ private struct BinaryReader {
     mutating func skipString32Bytes(matching expected: [UInt8]) throws -> Bool {
         let rawLen = try readUvarint()
         guard rawLen != UInt64.max else { return expected.isEmpty }
+        guard rawLen <= UInt64(Int.max), Int(rawLen) <= data.count - idx else {
+            throw AsunError.invalidData("binary decode: length out of range")
+        }
         let len = Int(rawLen)
-        guard idx + len <= data.count else { throw AsunError.unexpectedEOF }
         let matches = len == expected.count && data[idx..<(idx + len)].elementsEqual(expected)
         idx += len
         return matches
@@ -3155,8 +3206,10 @@ private struct BinaryReader {
     mutating func readString32() throws -> String {
         let rawLen = try readUvarint()
         if rawLen == UInt64.max { return "" }
+        guard rawLen <= UInt64(Int.max), Int(rawLen) <= data.count - idx else {
+            throw AsunError.invalidData("binary decode: length out of range")
+        }
         let count = Int(rawLen)
-        guard idx + count <= data.count else { throw AsunError.unexpectedEOF }
         let out = data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> String in
             let base = raw.baseAddress!.advanced(by: idx)
                 .assumingMemoryBound(to: UInt8.self)
@@ -3167,6 +3220,8 @@ private struct BinaryReader {
     }
 
     mutating func readValue(as type: SchemaType) throws -> AsunValue {
+        try enterDepth()
+        defer { depth -= 1 }
         if type.isOptional {
             switch try readByte() {
             case 0:
@@ -3189,10 +3244,12 @@ private struct BinaryReader {
         case .bool:
             return .bool(try readByte() != 0)
         case .str:
-            let rawLen = try readUvarint()
-            if rawLen == UInt64.max { return .null }
-            let count = Int(rawLen)
-            guard idx + count <= data.count else { throw AsunError.unexpectedEOF }
+            let peekLen = try readUvarint()
+            if peekLen == UInt64.max { return .null }
+            guard peekLen <= UInt64(Int.max), Int(peekLen) <= data.count - idx else {
+                throw AsunError.invalidData("binary decode: length out of range")
+            }
+            let count = Int(peekLen)
             let out = data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> String in
                 let base = raw.baseAddress!.advanced(by: idx)
                     .assumingMemoryBound(to: UInt8.self)
@@ -3201,7 +3258,7 @@ private struct BinaryReader {
             idx += count
             return .string(out)
         case .array(let inner):
-            let n = Int(try readUvarint())
+            let n = try readCount()
             var out: [AsunValue] = []
             out.reserveCapacity(n)
             for _ in 0..<n {

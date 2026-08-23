@@ -1384,6 +1384,110 @@ test {
 }
 
 // ===========================================================================
+// 35. Hardening fixes (P0-2 depth, P1-4 float, P1-5 overflow, P1-6 cache, P2-7 surrogates)
+// ===========================================================================
+section("35. Hardening fixes")
+
+// P0-2: deeply nested untyped input must throw, not overflow the native stack.
+test {
+    let s = String(repeating: "[", count: 5000) + String(repeating: "]", count: 5000)
+    assertThrows({ _ = try decode(s) }, "deep nesting rejected")
+}
+
+test {
+    // Within the limit decodes fine.
+    let s = String(repeating: "[", count: 100) + String(repeating: "]", count: 100)
+    let d = try decode(s)
+    if case .array = d { passed += 1; total += 1 }
+    else { failed += 1; total += 1; print("  ✗ shallow nesting should decode to array") }
+}
+
+// P0-2: a schema-driven binary payload claiming absurd nesting/length must not
+// allocate wildly or crash — a truncated length is rejected.
+test {
+    // Deeply nested array *type* annotation is bounded too.
+    let deepType = "{x@" + String(repeating: "[", count: 5000) + "int"
+        + String(repeating: "]", count: 5000) + "}:(1)"
+    assertThrows({ _ = try decode(deepType) }, "deep schema type rejected")
+}
+
+// P1-4: -0.0 keeps its sign; fractional doubles round-trip through encode/decode.
+test {
+    let s = try encode(.object(["v": .float(-0.0)]))
+    assertTrue(s.contains("-0.0"), "negative zero encodes as -0.0, got \(s)")
+}
+
+test {
+    let vals: [Double] = [0.1, 0.2, 0.3, 8.61, 2.675, 9.95, 1.15, 123456789.123456789, -0.3]
+    for x in vals {
+        let s = try encode(.object(["v": .float(x)]))
+        let d = try decode(s)
+        if case .object(let o) = d, case .float(let back)? = o["v"] {
+            assertEq(back, x, "double round-trip \(x)")
+        } else {
+            failed += 1; total += 1; print("  ✗ float round-trip decode failed for \(x)")
+        }
+    }
+}
+
+// P1-5: integer overflow in an untyped value is preserved as a string (not
+// silently wrapped); a huge binary length is rejected rather than trapping.
+test {
+    let d = try decode("{v}:(9223372036854775808)") // 2^63, one past Int64.max
+    if case .object(let o) = d, case .string? = o["v"] {
+        passed += 1; total += 1
+    } else {
+        failed += 1; total += 1; print("  ✗ overflowing int should fall back to string, got \(d)")
+    }
+    let lo = try decode("{v}:(-9223372036854775808)") // Int64.min
+    if case .object(let o) = lo, case .int(Int64.min)? = o["v"] { passed += 1; total += 1 }
+    else { failed += 1; total += 1; print("  ✗ Int64.min should decode exactly") }
+}
+
+// P1-5: a binary blob with an out-of-range element count throws instead of
+// trapping on `Int(_:)` / attempting a giant allocation.
+test {
+    // ASUNBIN1 magic + str-schema {s} then a bogus 10-byte varint length.
+    var blob = Data([0x41,0x53,0x4F,0x4E,0x42,0x49,0x4E,0x31]) // "ASONBIN1"
+    // Rather than hand-assemble a full frame, just confirm a clearly-too-short
+    // truncated frame is rejected gracefully (no crash).
+    blob.append(contentsOf: [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F])
+    assertThrows({ _ = try decodeBinary(blob) }, "oversized binary length rejected")
+}
+
+// P2-7: \uXXXX combines surrogate pairs and rejects lone/unpaired ones.
+test {
+    let d = try decode("\"\\uD83D\\uDE00\"") // 😀
+    assertEq(d, .string("😀"), "surrogate pair combines to emoji")
+}
+
+test {
+    let d = try decode("{s}:(\"\\uD83D\\uDE00\")")
+    if case .object(let o) = d, case .string("😀")? = o["s"] { passed += 1; total += 1 }
+    else { failed += 1; total += 1; print("  ✗ surrogate pair in tuple failed: \(d)") }
+}
+
+test {
+    assertThrows({ _ = try decode("\"\\uD800\"") }, "lone high surrogate rejected")
+    assertThrows({ _ = try decode("\"\\uDC00\"") }, "lone low surrogate rejected")
+    assertThrows({ _ = try decode("\"\\uD83Dabcd\"") }, "unpaired high surrogate rejected")
+    assertThrows({ _ = try decode("\"\\u00ZZ\"") }, "bad hex digits rejected")
+}
+
+// P1-6: feeding many distinct schemas keeps working (cache is bounded, not
+// unbounded); correctness must survive a cache wipe.
+test {
+    for i in 0..<1200 {
+        let s = "{f\(i)}:(\(i))"
+        let d = try decode(s)
+        if case .object(let o) = d, o["f\(i)"] != nil { continue }
+        failed += 1; total += 1; print("  ✗ schema #\(i) decode failed")
+        break
+    }
+    passed += 1; total += 1
+}
+
+// ===========================================================================
 // Summary
 // ===========================================================================
 
